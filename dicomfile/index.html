@@ -1,0 +1,213 @@
+<!DOCTYPE HTML>
+<html>
+
+<!-- Mirrored from rawgit.com/cornerstonejs/cornerstoneWADOImageLoader/master/examples/dicomfile/index.html by HTTrack Website Copier/3.x [XR&CO'2014], Fri, 18 Mar 2022 19:11:52 GMT -->
+<!-- Added by HTTrack --><meta http-equiv="content-type" content="text/html;charset=utf-8" /><!-- /Added by HTTrack -->
+<head>
+    <!-- twitter bootstrap CSS stylesheet - included to make things pretty, not needed or used by cornerstone -->
+    <link href="../bootstrap.min.css" rel="stylesheet">
+    <link href="../cornerstone.min.css" rel="stylesheet">
+</head>
+<body>
+<div class="container">
+
+    <div class="page-header">
+        <h1>Example of displaying a DICOM P10 from the local file system and using tensorflowjs to predict the presence of text.</h1>
+        <br>
+        <p class="lead">
+            Click "Choose File" and select a DICOM P10 file on your local file system.
+        </p>
+    </div>
+
+    <div class="row">
+        <form id="form" class="form-horizontal">
+            <div class="form-group">
+                <div class="col-sm-3">
+                    <input type="file" id="selectFile" >
+                </div>
+            </div>
+        </form>
+    </div>
+    <br>
+    <div class="row">
+        <div class="col-md-6">
+            <div style="width:512px;height:512px;position:relative;color: white;display:inline-block;border-style:solid;border-color:black;"
+                 oncontextmenu="return false"
+                 class='disable-selection noIbar'
+                 unselectable='on'
+                 onselectstart='return false;'
+                 onmousedown='return false;'>
+                <div id="dicomImage"
+                     style="width:512px;height:512px;top:0px;left:0px; position:absolute">
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <span>Transfer Syntax: </span><span id="transferSyntax"></span><br>
+            <span>Samples Per Pixel: </span><span id="samplesPerPixel"></span><br>
+            <span>Photometric Interpretation: </span><span id="photometricInterpretation"></span><br>
+            <span>Number Of Frames: </span><span id="numberOfFrames"></span><br>
+            <span>Rows: </span><span id="rows"></span><br>
+            <span>Columns: </span><span id="columns"></span><br>
+            <span>Pixel Spacing: </span><span id="pixelSpacing"></span><br>
+            <span>Bits Allocated: </span><span id="bitsAllocated"></span><br>
+            <span>Bits Stored: </span><span id="bitsStored"></span><br>
+            <span>Min Stored Pixel Value: </span><span id="minStoredPixelValue"></span><br>
+            <span>Max Stored Pixel Value: </span><span id="maxStoredPixelValue"></span><br>
+            <span>Total Time: </span><span id="totalTime"></span><br>
+            <span>Load Time: </span><span id="loadTime"></span><br>
+            <span>Decode Time: </span><span id="decodeTime"></span><br>
+        </div>
+    </div>
+</div>
+</body>
+
+<!-- include the cornerstone library -->
+<script src="../cornerstone.min.js"></script>
+<SCRIPT src="../cornerstoneMath.min.js"></SCRIPT>
+<SCRIPT src="../cornerstoneTools.min.js"></SCRIPT>
+
+<!-- include the dicomParser library as the WADO image loader depends on it -->
+<script src="../dicomParser.min.js"></script>
+
+<!-- uids -->
+<script src="uids.js"></script>
+
+<!-- Lines ONLY required for this example to run without building the project -->
+<script>window.cornerstoneWADOImageLoader || document.write('<script src="https://unpkg.com/cornerstone-wado-image-loader">\x3C/script>')</script>
+<script src="../utils/initializeWebWorkers.js"></script>
+
+<!-- Import @tensorflow/tfjs-core -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+<!-- Adds the CPU backend -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu"></script>
+<!--
+  Import @tensorflow/tfjs-tflite
+
+  Note that we need to explicitly load dist/tf-tflite.min.js so that it can
+  locate WASM module files from their default location (dist/).
+-->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js"></script>
+
+<script>
+    cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
+
+    // this function gets called once the user drops the file onto the div
+    function handleFileSelect(evt) {
+        evt.stopPropagation();
+        evt.preventDefault();
+
+        // Get the FileList object that contains the list of files that were dropped
+        const files = evt.dataTransfer.files;
+
+        // this UI is only built for a single file so just dump the first one
+        file = files[0];
+        const imageId = cornerstoneWADOImageLoader.wadouri.fileManager.add(file);
+        loadAndViewImage(imageId);
+    }
+
+    let loaded = false;
+
+    async function loadAndViewImage(imageId) {
+        const element = document.getElementById('dicomImage');
+        const start = new Date().getTime();
+
+        // LOAD CORNERSTONE IMAGE 
+        cornerstone.loadImage(imageId).then(async function(image) {
+            // CONVERT UINT8ARRAY -> UINT32ARRAY TO PREP FOR PREDICTION
+            const uint32 = new Uint32Array(image.data.byteArray.buffer);
+            const height = image.height;
+            const width = image.width
+            const data = {data: uint32, width:width, height:height}
+
+            //SET HEIGHT AND WIDTH REQUIRED BY MODEL
+            const MAX_WIDTH = 320;
+            const MAX_HEIGHT = 320;
+            let newHeight;
+            let newWidth;
+
+            // CHANGE THE RESIZING LOGIC TO ENSURE RATIO IS MAINTAINED IF IMG NOT SQUARE
+            if (width > height) {
+                if (width > MAX_WIDTH) {
+                    newHeight = height * (MAX_WIDTH / width);
+                    newWidth = MAX_WIDTH;
+                }
+            } else {
+                if (height > MAX_HEIGHT) {
+                    newWidth = width * (MAX_HEIGHT / height);
+                    newHeight = MAX_HEIGHT;
+                }
+            }
+
+            // LOAD TFLITE MODEL
+            console.log("start loading tflite model");
+            const tfliteModel = await tflite.loadTFLiteModel("https://tfhub.dev/sayakpaul/lite-model/east-text-detector/fp16/1");
+            console.log(tfliteModel);
+            
+            // PREPARE INPUT TENSORS
+            const img = tf.browser.fromPixels({data: image.data.byteArray, width:width, height:height});
+            const input = tf.sub(tf.div(tf.expandDims(tf.image.resizeBilinear(img,[newHeight,newWidth])), 127.5), 1);
+
+            // RUN INFERENCE AND GET OUTPUT TENSORS
+            // let outputTensor = tfliteModel.predict(input);
+            console.log("inference made")
+            // console.log(outputTensor);
+            
+            // DISPLAY DICOM IMAGE IN VIEWPORT
+            const viewport = cornerstone.getDefaultViewportForImage(element, image);
+            cornerstone.displayImage(element, image, viewport);
+
+            // LOAD TOOLING TO INTERACT WITH DICOM IMAGE
+            if(loaded === false) {
+                cornerstoneTools.mouseInput.enable(element);
+                cornerstoneTools.mouseWheelInput.enable(element);
+                cornerstoneTools.wwwc.activate(element, 1); // ww/wc is the default tool for left mouse button
+                cornerstoneTools.pan.activate(element, 2); // pan is the default tool for middle mouse button
+                cornerstoneTools.zoom.activate(element, 4); // zoom is the default tool for right mouse button
+                cornerstoneTools.zoomWheel.activate(element); // zoom is the default tool for middle mouse wheel
+                cornerstoneTools.imageStats.enable(element);
+                loaded = true;
+            }
+
+            //----- HELPER FUNCTION TO PARSE DICOME FILE INFO------
+            function getTransferSyntax() {
+                const value = image.data.string('x00020010');
+                return value + ' [' + uids[value] + ']';
+            }
+
+            // DISPLAY PARSED DICOM INFO
+            document.getElementById('transferSyntax').textContent = getTransferSyntax();
+            document.getElementById('samplesPerPixel').textContent = image.data.uint16('x00280002');
+            document.getElementById('numberOfFrames').textContent = image.data.string('x00280008');
+            document.getElementById('rows').textContent = image.data.uint16('x00280010');
+            document.getElementById('columns').textContent = image.data.uint16('x00280011');
+            document.getElementById('pixelSpacing').textContent = image.data.string('x00280030');
+            document.getElementById('bitsAllocated').textContent = image.data.uint16('x00280100');
+            document.getElementById('bitsStored').textContent = image.data.uint16('x00280101');
+            document.getElementById('minStoredPixelValue').textContent = image.minPixelValue;
+            document.getElementById('maxStoredPixelValue').textContent = image.maxPixelValue;
+            const end = new Date().getTime();
+            const time = end - start;
+            document.getElementById('totalTime').textContent = time + "ms";
+            document.getElementById('loadTime').textContent = image.loadTimeInMS + "ms";
+            document.getElementById('decodeTime').textContent = image.decodeTimeInMS + "ms";
+
+        }, function(err) {
+            alert(err);
+        });
+    }
+
+    const element = document.getElementById('dicomImage');
+    cornerstone.enable(element);
+
+    document.getElementById('selectFile').addEventListener('change', function(e) {
+        // Add the file to the cornerstoneFileImageLoader and get unique
+        // number for that file
+        const file = e.target.files[0];
+        const imageId = cornerstoneWADOImageLoader.wadouri.fileManager.add(file);
+        loadAndViewImage(imageId);
+    });
+</script>
+
+<!-- Mirrored from rawgit.com/cornerstonejs/cornerstoneWADOImageLoader/master/examples/dicomfile/index.html by HTTrack Website Copier/3.x [XR&CO'2014], Fri, 18 Mar 2022 19:11:54 GMT -->
+</html>
